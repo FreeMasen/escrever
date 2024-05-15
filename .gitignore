@@ -1,3 +1,4 @@
 /target
 /**/*.lua
-.vscode/launch.json
+.vscode
+/**/*.diff
