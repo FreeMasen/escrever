@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, io::Write};
+use std::{collections::BTreeMap, io::Write};
 
 use analisar::aware::ast;
 use lex_lua::Span;
@@ -6,24 +6,32 @@ use lex_lua::Span;
 pub struct Writer<W: Write> {
     dest: W,
     last_offset: usize,
-    line_map: BTreeSet<usize>,
-    orig: Vec<u8>,
+    line_map: BTreeMap<usize, &'static [u8]>,
 }
 
 impl<W: Write> Writer<W> {
-    fn calculate_line_map(src: &[u8]) -> BTreeSet<usize> {
-        let mut last_char = b'*';
-        let mut ret = BTreeSet::new();
-        for (cursor, &ch) in src.iter().enumerate() {
-            if ch == b'\n' {
-                if last_char != b'\r' {
-                    ret.insert(cursor);
+    fn calculate_line_map(src: &[u8]) -> BTreeMap<usize, &'static [u8]> {
+        let mut ret: BTreeMap<usize, &[u8]> = BTreeMap::new();
+        let mut i = 0;
+        while i < src.len() {
+            let ch = src[i];
+            let nl_set: &[u8] = match ch {
+                b'\r' => {
+                    if let Some(&b'\n') = src.get(i+1) {
+                        &[b'\r',b'\n']
+                    } else {
+                        &[b'\r']
+                    }
                 }
-            }
-            if ch == b'\r' || ch == 0xff {
-                ret.insert(cursor);
-            }
-            last_char = ch;
+                b'\n' => &[b'\n'],
+                0xff => &[0xff],
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            ret.insert(i, nl_set);
+            i += nl_set.len();
         }
         ret
     }
@@ -33,12 +41,11 @@ impl<W: Write> Writer<W> {
             dest,
             last_offset: 0,
             line_map: Self::calculate_line_map(src),
-            orig: src.to_vec(),
         }
     }
 
     pub fn write_stmt(&mut self, stmt: &ast::Statement) -> std::io::Result<()> {
-        eprintln!("write_stmt: {:?}", stmt);
+        log::trace!("write_stmt: {:?}", stmt);
         match stmt {
             ast::Statement::Empty(v) => self.write_spanned(v, b";"),
             ast::Statement::Expression(e) => self.write_expr(e),
@@ -109,13 +116,7 @@ impl<W: Write> Writer<W> {
                 self.write_spanned(until_span, b"until")?;
                 self.write_expr(exp)
             }
-            ast::Statement::If(s) => {
-                self.write_spanned(&s.if_span, b"if")?;
-                self.write_expr(&s.test)?;
-                self.write_spanned(&s.then_span, b"then")?;
-                self.write_block(&s.block)?;
-                self.write_spanned(&s.end_span, b"end")
-            }
+            ast::Statement::If(s) => self.write_if(s),
             ast::Statement::For(f) => {
                 self.write_spanned(&f.for_span, b"for")?;
                 self.write_name(&f.init_name)?;
@@ -178,6 +179,30 @@ impl<W: Write> Writer<W> {
         }
     }
 
+    fn write_if(&mut self, s: &ast::If) -> std::io::Result<()> {
+        self.write_spanned(&s.if_span, b"if")?;
+        self.write_expr(&s.test)?;
+        self.write_spanned(&s.then_span, b"then")?;
+        self.write_block(&s.block)?;
+        for ei in &s.else_ifs {
+            self.write_else_if(ei)?;
+        }
+        if let Some(e) = &s.else_span {
+            self.write_spanned(e, b"else")?;
+        }
+        if let Some(eb) = &s.catch_all {
+            self.write_block(&eb)?;
+        }
+        self.write_spanned(&s.end_span, b"end")
+    }
+
+    fn write_else_if(&mut self, s: &ast::ElseIf) -> std::io::Result<()> {
+        self.write_spanned(&s.else_if_span, b"elseif")?;
+        self.write_expr(&s.test)?;
+        self.write_spanned(&s.then_span, b"then")?;
+        self.write_block(&s.block)
+    }
+
     fn write_expr(&mut self, expr: &ast::Expression) -> std::io::Result<()> {
         match expr {
             ast::Expression::Nil(s) => self.write_spanned(s, b"nil"),
@@ -187,7 +212,10 @@ impl<W: Write> Writer<W> {
             ast::Expression::LiteralString(l) => self.write_spanned(&l.span, l.value.as_ref()),
             ast::Expression::Name(n) => self.write_name(&n),
             ast::Expression::VarArgs(v) => self.write_spanned(v, b"..."),
-            ast::Expression::FunctionDef(f) => self.write_fn_def(&f),
+            ast::Expression::FunctionDef(f) => {
+                self.write(b"function")?;
+                self.write_fn_def(&f)
+            },
             ast::Expression::TableCtor(t) => self.write_table(t.as_ref()),
             ast::Expression::Parened {
                 open_span,
@@ -371,8 +399,7 @@ impl<W: Write> Writer<W> {
                 ast::ParListPart::VarArgs(v) => self.write_spanned(v, b"...")?,
             }
         }
-        self.write_spanned(&f.close_paren_span, b"(")?;
-        self.write(b" then\n")?;
+        self.write_spanned(&f.close_paren_span, b")")?;
         self.write_block(&f.block)?;
         self.write_spanned(&f.end_span, b"end")
     }
@@ -395,7 +422,7 @@ impl<W: Write> Writer<W> {
     }
 
     fn write_spanned(&mut self, span: &Span, bytes: &[u8]) -> std::io::Result<()> {
-        eprintln!(
+        log::trace!(
             "write_spanned {span:?} {:?} {:?}",
             String::from_utf8_lossy(bytes),
             self.last_offset
@@ -407,34 +434,28 @@ impl<W: Write> Writer<W> {
     }
 
     fn handle_whitespace(&mut self, span: &Span) -> std::io::Result<()> {
-        debug_assert!(
-            self.last_offset == 0 && span.start == 0 || self.last_offset < span.start,
-            "{} >= {}\n{:?}\n{}^",
-            self.last_offset,
-            span.start,
-            String::from_utf8_lossy(&self.orig[self.last_offset.saturating_sub(10)..span.end]),
-            " ".repeat(10)
-        );
-
-        for i in self.last_offset..span.start {
-            if self.line_map.contains(&i) {
-                self.write(b"\n")?;
-                self.dest.flush()?;
-            } else {
-                self.write(b" ")?;
-            }
+        log::trace!("{}->{}", self.last_offset, span.start);
+        // copied or cloned wont work here because those expect iterators that return references but range returns
+        // an owned tuple with references for fields.
+        let new_lines: Vec<_> = self.line_map.range(self.last_offset..span.start).map(|(idx, ch)| {
+            (*idx, *ch)
+        }).collect();
+        for (i, bytes) in &new_lines {
+            self.write(bytes)?;
+            self.last_offset = i + bytes.len();
         }
-        // if self.last_offset < span.start {
-        //     for new_line in self.line_map.range(self.last_offset..span.start) {
-
-        //     }
-        // }
+        for _ in self.last_offset..span.start {
+            self.write(b" ")?;
+        }
+        if !new_lines.is_empty() {
+            self.dest.flush()?;
+        }
         Ok(())
     }
 
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.dest.write_all(bytes)?;
-        self.last_offset += bytes.len() - 1;
+        self.last_offset = self.last_offset.wrapping_add(bytes.len());
         Ok(())
     }
 }
@@ -470,6 +491,50 @@ mod tests {
             dest,
             "\n{:?}\n{:?}",
             String::from_utf8_lossy(lua),
+            String::from_utf8_lossy(&dest)
+        );
+    }
+
+    #[test]
+    fn fn_expr() {
+        let lua = b"(function() end)\n";
+        let mut p = Parser::new(lua);
+        let mut dest = Vec::new();
+        {
+            let mut w = Writer::new(lua, &mut dest);
+            while let Some(Ok(stmt)) = p.next() {
+                w.write_stmt(&stmt.statement).unwrap();
+            }
+        }
+        assert_eq!(
+            lua.to_vec(),
+            dest,
+            "\n{:?}\n{:?}",
+            String::from_utf8_lossy(lua),
+            String::from_utf8_lossy(&dest)
+        );
+    }
+
+    #[test]
+    fn preserve_early_whitespace() {
+        let lua = br#"-- this is some early whitespace
+
+local value = {}
+"#;
+        let mut p = Parser::new(lua);
+        let mut dest = Vec::new();
+        {
+            let mut w = Writer::new(lua, &mut dest);
+            while let Some(Ok(stmt)) = p.next() {
+                w.write_stmt(&stmt.statement).unwrap();
+            }
+        }
+        let expected: &[u8] = b"\n\nlocal value = {}\n".as_slice();
+        assert_eq!(
+            expected,
+            dest,
+            "\n{:?}\n{:?}",
+            String::from_utf8_lossy(expected),
             String::from_utf8_lossy(&dest)
         );
     }

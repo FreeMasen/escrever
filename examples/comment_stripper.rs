@@ -1,4 +1,5 @@
 fn main() {
+    env_logger::init();
     let target = std::env::args().skip(1).next().expect("path to lua file");
     let lua = std::fs::read(&target).expect("file not found");
     let mut parser = analisar::aware::Parser::new(&lua);
