@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
@@ -31,22 +31,10 @@ fn main() {
         
         let p = diff_path.parent().expect("non-root diff");
         std::fs::create_dir_all(p).ok();
-        let mut changes = Vec::new();
-        for v in diff::lines(&String::from_utf8_lossy(&orig), &String::from_utf8_lossy(&stripped)) {
-            match v {
-                diff::Result::Left(removed) => {
-                    changes.push(format!("- {removed}"));
-                },
-                diff::Result::Right(added) => {
-                    changes.push(format!("+ {added}"));
-                },
-                diff::Result::Both(_, _) => {},
-            }
-        }
-        if changes.is_empty() {
-            std::fs::remove_file(&diff_path).ok();
+        if let Some(changes) = generate_diff(&orig, &stripped, &entry.path(), &dest_path) {
+            std::fs::write(&diff_path, changes).unwrap();
         } else{
-            std::fs::write(&diff_path, changes.join("\n")).unwrap();
+            std::fs::remove_file(&diff_path).ok();
         }
     }
 }
@@ -59,4 +47,48 @@ fn do_one(lua: &[u8]) -> Vec<u8> {
         writer.write_stmt(&stmt.statement).unwrap()
     }}
     ret
+}
+
+fn generate_diff(
+    orig: &[u8],
+    stripped: &[u8],
+    o_path: &Path,
+    s_path: &Path,
+) -> Option<String> {
+    let splitter = |v: &u8| *v == b'\n' || *v == b'\r' || *v == 0xff;
+    let mut ret = String::new();
+    for (line_no, (o, s)) in orig.split(splitter).zip(stripped.split(splitter)).enumerate() {
+        if o == s {
+            continue;
+        }
+        let original = String::from_utf8_lossy(o);
+        let stripped = String::from_utf8_lossy(s);
+        if original.contains("--") {
+            continue;
+        }
+        if original.trim_end() == stripped {
+            continue;
+        }
+        let mut non_whitespace_err = false;
+        for (l, r) in o.iter().zip(s.iter()) {
+            if l == r {
+                continue;
+            }
+            if !(*l == b'\t' && *r == b' ') {
+                non_whitespace_err = true;
+                break;
+            }
+        }
+        if non_whitespace_err {
+            ret.push_str(&format!("line number {line_no}\n"));
+            ret.push_str(&format!("--- {}\n", o_path.display()));
+            ret.push_str(&format!("+++ {}\n", s_path.display()));
+            ret.push_str(&format!("+ {stripped}\n"));
+            ret.push_str(&format!("- {original}\n"));
+        }
+    }
+    if ret.is_empty() {
+        return None;
+    }
+    Some(ret)
 }

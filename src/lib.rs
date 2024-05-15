@@ -74,9 +74,9 @@ impl<W: Write> Writer<W> {
                 name,
                 colons2_span,
             } => {
-                self.write_spanned(colons1_span, b":")?;
+                self.write_spanned(colons1_span, b"::")?;
                 self.write_name(name)?;
-                self.write_spanned(colons2_span, b":")
+                self.write_spanned(colons2_span, b"::")
             }
             ast::Statement::Break(s) => self.write_spanned(s, b"break"),
             ast::Statement::GoTo { goto_span, label } => {
@@ -299,10 +299,10 @@ impl<W: Write> Writer<W> {
             ast::BinaryOperator::Multiply(s) => (s, "*"),
             ast::BinaryOperator::Divide(s) => (s, "/"),
             ast::BinaryOperator::FloorDivide(s) => (s, "//"),
-            ast::BinaryOperator::Power(s) => (s, "**"),
+            ast::BinaryOperator::Power(s) => (s, "^"),
             ast::BinaryOperator::Modulo(s) => (s, "%"),
             ast::BinaryOperator::BitwiseAnd(s) => (s, "&"),
-            ast::BinaryOperator::BitwiseXor(s) => (s, "^"),
+            ast::BinaryOperator::BitwiseXor(s) => (s, "~"),
             ast::BinaryOperator::BitwiseOr(s) => (s, "|"),
             ast::BinaryOperator::RightShift(s) => (s, ">>"),
             ast::BinaryOperator::LeftShift(s) => (s, "<<"),
@@ -345,28 +345,14 @@ impl<W: Write> Writer<W> {
                 value,
                 sep,
             } => {
-                let needs_braces = !matches!(name, ast::Expression::Name(_));
-                if needs_braces {
-                    let s = name.start();
-                    self.write_spanned(
-                        &Span {
-                            start: s - 1,
-                            end: s,
-                        },
-                        b"[",
-                    )?;
+                if let Some(open) = &name.open_bracket {
+                    self.write_spanned(open, b"[")?;
                 }
-                self.write_expr(name)?;
-                if needs_braces {
-                    let e = name.end();
-                    self.write_spanned(
-                        &Span {
-                            start: e,
-                            end: e + 1,
-                        },
-                        b"]",
-                    )?;
+                self.write_expr(&name.expr)?;
+                if let Some(close) = &name.close_bracket {
+                    self.write_spanned(close, b"]")?;
                 }
+                
                 self.write_spanned(eq, b"=")?;
                 self.write_expr(value)?;
                 if let Some(sep) = sep {
