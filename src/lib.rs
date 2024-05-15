@@ -212,9 +212,9 @@ impl<W: Write> Writer<W> {
             ast::Expression::LiteralString(l) => self.write_spanned(&l.span, l.value.as_ref()),
             ast::Expression::Name(n) => self.write_name(&n),
             ast::Expression::VarArgs(v) => self.write_spanned(v, b"..."),
-            ast::Expression::FunctionDef(f) => {
-                self.write(b"function")?;
-                self.write_fn_def(&f)
+            ast::Expression::FunctionDef {keyword, body} => {
+                self.write_spanned(keyword, b"function")?;
+                self.write_fn_def(&body)
             },
             ast::Expression::TableCtor(t) => self.write_table(t.as_ref()),
             ast::Expression::Parened {
@@ -498,6 +498,26 @@ mod tests {
     #[test]
     fn fn_expr() {
         let lua = b"(function() end)\n";
+        let mut p = Parser::new(lua);
+        let mut dest = Vec::new();
+        {
+            let mut w = Writer::new(lua, &mut dest);
+            while let Some(Ok(stmt)) = p.next() {
+                w.write_stmt(&stmt.statement).unwrap();
+            }
+        }
+        assert_eq!(
+            lua.to_vec(),
+            dest,
+            "\n{:?}\n{:?}",
+            String::from_utf8_lossy(lua),
+            String::from_utf8_lossy(&dest)
+        );
+    }
+
+    #[test]
+    fn fn_expr2() {
+        let lua = b"local f = function () end\n";
         let mut p = Parser::new(lua);
         let mut dest = Vec::new();
         {

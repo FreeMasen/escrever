@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Command};
+use std::path::PathBuf;
 
 use walkdir::WalkDir;
 
@@ -25,15 +25,29 @@ fn main() {
         let p = dest_path.parent().expect("non-root dest");
         std::fs::create_dir_all(p).ok();
         std::fs::write(&dest_path, &stripped).unwrap();
+        // return;
         let diff_path = entry.path().strip_prefix(&target).expect("shared root");
-        let diff_path = diff.join(diff_path);
+        let diff_path = diff.join(diff_path).with_extension("diff");
+        
         let p = diff_path.parent().expect("non-root diff");
         std::fs::create_dir_all(p).ok();
-        let diff = Command::new("diff").arg("-u").args(&[
-            entry.path(),
-            dest_path.as_path(),
-        ]).output().unwrap();
-        std::fs::write(&diff_path, diff.stdout).unwrap();
+        let mut changes = Vec::new();
+        for v in diff::lines(&String::from_utf8_lossy(&orig), &String::from_utf8_lossy(&stripped)) {
+            match v {
+                diff::Result::Left(removed) => {
+                    changes.push(format!("- {removed}"));
+                },
+                diff::Result::Right(added) => {
+                    changes.push(format!("+ {added}"));
+                },
+                diff::Result::Both(_, _) => {},
+            }
+        }
+        if changes.is_empty() {
+            std::fs::remove_file(&diff_path).ok();
+        } else{
+            std::fs::write(&diff_path, changes.join("\n")).unwrap();
+        }
     }
 }
 
